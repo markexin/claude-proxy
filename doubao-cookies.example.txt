@@ -1,0 +1,12 @@
+# 方式 B：将本文件复制为 doubao-cookies.txt，填入 Cookie（勿提交 Git）
+#
+# 支持两种写法：
+# 1) 一整行，与浏览器开发者工具里请求头 Cookie 相同，例如：
+#    name1=value1; name2=value2; ...
+#
+# 2) 多行：每行一段 name=value，或一行写不完时分多行，程序会把非注释行用空格拼成一串再解析。
+#
+# 以 # 开头的行视为注释。
+#
+# 重要：必须从开发者工具 Application → Cookies 里复制（含 HttpOnly）。
+# 控制台执行 document.cookie 拿不到 HttpOnly，容易导致「无权限访问该会话」。

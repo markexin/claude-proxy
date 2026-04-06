@@ -1,0 +1,8 @@
+{
+  "webChatUrl": "https://claude.ai/chat/83d0a1dd-c4db-4094-814c-8810d60c534c",
+  "webWatchMode": "cdp",
+  "webCdpUrl": "http://127.0.0.1:9222",
+  "webMessageCaptureMode": "sse",
+  "webSseUrlIncludes": "*",
+  "webSseDebug": true
+}

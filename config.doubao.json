@@ -1,0 +1,8 @@
+{
+  "webChatUrl": "https://www.doubao.com/chat/38420252204674818",
+  "webMessageSelector": "[data-testid=\"message_text_content\"]",
+  "webHeadless": true,
+  "webCookieSource": "file",
+  "webMessageCaptureMode": "sse",
+  "webCookieFile": "doubao-cookies.txt"
+}
