@@ -10,7 +10,7 @@
   "webCookieSameSite": "Lax",
   "webViewportWidth": 1280,
   "webViewportHeight": 800,
-  "webMessageSelector": "[data-testid=\"message_text_content\"]",
+  "webMessageSelector": "",
   "webInputSelector": "",
   "webHeadless": true,
   "webReplyWaitMs": 90000,
@@ -23,11 +23,12 @@
   "webWatchUseMutation": true,
   "webWatchMutationDebounceMs": 400,
   "webMessageCaptureMode": "dom",
+  "webProvider": "auto",
   "webSseUrlIncludes": "",
   "webSseMaxBufferLines": 2000,
   "webSseCdpNetwork": true,
   "webSseCdpBodyMaxChars": 120000,
-  "webSseGiveUpNoNewLinesMs": 6000,
+  "webSseGiveUpNoNewLinesMs": 45000,
   "webSseWatchTurns": "all",
   "webSseNormalizeAnthropic": true,
   "webSseOutputPlainText": true,
@@ -42,5 +43,6 @@
   "webServeAssumeOpenAiStream": true,
   "webServeStreamChunkChars": 160,
   "webServeToken": "",
-  "webServeCorsOrigin": ""
+  "webServeCorsOrigin": "",
+  "webServeTimingLog": false
 }

@@ -26,6 +26,30 @@ function roughTokenCount(text) {
 }
 
 /**
+ * `config.json` 设 `webServeTimingLog: true` 时用 console.log 打阶段耗时（累计 + 距上一段）。
+ * @param {Record<string, unknown>} cfg
+ * @returns {{ mark: (phase: string, extra?: string) => void } | null}
+ */
+function createTimingSink(cfg) {
+  if (cfg.webServeTimingLog !== true) return null;
+  const t0 = Date.now();
+  let last = t0;
+  let step = 0;
+  return {
+    mark(phase, extra = '') {
+      const now = Date.now();
+      const total = now - t0;
+      const delta = now - last;
+      step += 1;
+      console.log(
+        `[web-serve timing] #${step} ${phase} | 累计 ${total}ms | 距上段 +${delta}ms${extra ? ` | ${extra}` : ''}`,
+      );
+      last = now;
+    },
+  };
+}
+
+/**
  * 支持旧字段 prompt/text 与 OpenAI 风格 messages[]。
  * @param {unknown} j
  */
@@ -336,6 +360,11 @@ export async function startWebServe(cfg, cwd, options = {}) {
       '[web-serve] GET /messages：SSE/CDP 缓冲；POST /chat：默认先等 SSE/CDP 稳定再返回（快），无正文再回退 DOM 等待（webServePreferSseReply:false 可改回先 DOM）',
     );
   }
+  if (cfg.webServeTimingLog === true) {
+    console.log(
+      '[web-serve] webServeTimingLog=true：将用 console.log 输出 [web-serve timing]（含 CDP getResponseBody 与 sse-wait 各段）',
+    );
+  }
 
   /** @type {Promise<unknown>} */
   let queue = Promise.resolve();
@@ -586,6 +615,8 @@ export async function startWebServe(cfg, cwd, options = {}) {
 
         const out = await runExclusive(async () => {
           if (sseState) {
+            const timingSink = createTimingSink(cfg);
+            timingSink?.mark('请求已出队（互斥开始）', `sseLines=${sseState.snapshot().lines.length}`);
             const startLc = sseState.snapshot().lines.length;
             const replyWait = Number(cfg.webReplyWaitMs ?? 90_000);
             const settle = Number(cfg.webReplySettleMs ?? 2000);
@@ -598,6 +629,7 @@ export async function startWebServe(cfg, cwd, options = {}) {
               promptText,
               { source: 'web-serve' },
             );
+            timingSink?.mark('sendPromptOnlyOnPage 完成', `before=${before}`);
 
             const t0 = Date.now();
             /** @type {Awaited<ReturnType<typeof extractMessageNodes>>} */
@@ -606,11 +638,22 @@ export async function startWebServe(cfg, cwd, options = {}) {
             let replyTextSse;
 
             if (preferSse) {
-              replyTextSse = await waitForNewSseStable(sseState, startLc, cfg);
+              replyTextSse = await waitForNewSseStable(
+                sseState,
+                startLc,
+                cfg,
+                timingSink,
+              );
+              timingSink?.mark('waitForNewSseStable 结束（prefer SSE）');
               messages = await extractMessageNodes(page, cfg);
+              timingSink?.mark('extractMessageNodes 完成');
               if (!String(replyTextSse || '').trim()) {
                 const elapsed = Date.now() - t0;
                 const domBudget = Math.max(5000, replyWait - elapsed);
+                timingSink?.mark(
+                  'DOM 兜底 waitForAssistantReplyStable 开始',
+                  `budget=${domBudget}ms`,
+                );
                 messages = await waitForAssistantReplyStable(
                   page,
                   cfg,
@@ -619,8 +662,10 @@ export async function startWebServe(cfg, cwd, options = {}) {
                   settle,
                   poll,
                 );
+                timingSink?.mark('DOM 兜底 waitForAssistantReplyStable 结束');
               }
             } else {
+              timingSink?.mark('先 DOM waitForAssistantReplyStable 开始');
               messages = await waitForAssistantReplyStable(
                 page,
                 cfg,
@@ -629,21 +674,29 @@ export async function startWebServe(cfg, cwd, options = {}) {
                 settle,
                 poll,
               );
+              timingSink?.mark('先 DOM waitForAssistantReplyStable 结束');
               const elapsed = Date.now() - t0;
               const sseBudget = Math.max(5000, replyWait - elapsed);
-              replyTextSse = await waitForNewSseStable(sseState, startLc, {
-                ...cfg,
-                webReplyWaitMs: sseBudget,
-              });
+              replyTextSse = await waitForNewSseStable(
+                sseState,
+                startLc,
+                {
+                  ...cfg,
+                  webReplyWaitMs: sseBudget,
+                },
+                timingSink,
+              );
+              timingSink?.mark('waitForNewSseStable 结束（SSE 余量）');
             }
 
+            timingSink?.mark('组装 diagnostics / 选 reply 前');
             const promptTrim = String(promptText).trim();
             const replyMessage = pickReplyMessage(messages, promptTrim);
             const lastDom = messages.length ? messages[messages.length - 1] : null;
             const bodySnippet = await page
               .evaluate(() => document.body?.innerText?.slice(0, 800) || '')
               .catch(() => '');
-            let hint = sessionHint(bodySnippet, page.url());
+            let hint = sessionHint(bodySnippet, page.url(), cfg);
             if (!replyMessage && messages.length > before) {
               const extra =
                 '已出现新气泡但未解析到与提问不同的回复：可能页面结构变化，或回复与提问全文相同。可调大 webReplyWaitMs / webReplySettleMs。';

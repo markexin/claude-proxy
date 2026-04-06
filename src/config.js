@@ -14,7 +14,8 @@ const defaults = {
   webCookieAlsoInjectWww: false,
   webViewportWidth: 1280,
   webViewportHeight: 800,
-  webMessageSelector: '[data-testid="message_text_content"]',
+  /** 留空则按 `webProvider` 使用豆包/Claude 内置默认；可强制覆盖 */
+  webMessageSelector: '',
   webInputSelector: '',
   webHeadless: true,
   webWaitUntil: 'domcontentloaded',
@@ -36,8 +37,12 @@ const defaults = {
   webWatchUseMutation: true,
   webWatchMutationDebounceMs: 400,
   webMessageCaptureMode: 'dom',
+  /** `auto` 由 webChatUrl 推断 doubao | claude；可显式 `doubao` / `claude` */
+  webProvider: 'auto',
   webSseUrlIncludes: '',
   webSseMaxBufferLines: 2000,
+  /** Claude 等场景下 cdp-completion 往往较晚，过小会过早放弃 SSE、掉进 DOM 兜底 */
+  webSseGiveUpNoNewLinesMs: 45_000,
   webSseDebug: false,
   webServeHost: '127.0.0.1',
   webServePort: 3840,
@@ -46,6 +51,8 @@ const defaults = {
   webServeChatResponseFormat: 'openai',
   webOpenAiCompatModel: 'local/web-bridge',
   webServeAssumeOpenAiStream: true,
+  /** `true` 时 web-serve 与 CDP SSE 抓包用 console.log 打耗时 */
+  webServeTimingLog: false,
 };
 
 export function loadConfig(cwd = process.cwd()) {

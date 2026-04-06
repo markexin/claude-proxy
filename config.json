@@ -4,5 +4,7 @@
   "webCdpUrl": "http://127.0.0.1:9222",
   "webMessageCaptureMode": "sse",
   "webSseUrlIncludes": "*",
+  "webServeTimingLog": true,
+  "webProvider": "claude",
   "webSseDebug": true
 }

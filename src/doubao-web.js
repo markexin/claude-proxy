@@ -2,6 +2,12 @@ import { chromium } from 'playwright';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import {
+  effectiveMessageSelector,
+  findComposerForProvider,
+  sessionHintForProvider,
+  waitChatReadyForProvider,
+} from './web-provider.js';
 
 const DEFAULT_CHROME_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -108,44 +114,8 @@ export function loadCookieHeaderString(cfg, cwd) {
   );
 }
 
-async function findComposer(page, cfg) {
-  const custom = cfg.webInputSelector?.trim();
-  if (custom) {
-    const loc = page.locator(custom).first();
-    await loc.waitFor({ state: 'visible', timeout: cfg.webComposerTimeoutMs ?? 25_000 });
-    return loc;
-  }
-
-  // Claude.ai：Tiptap/ProseMirror，contenteditable + data-testid="chat-input"
-  // chat_input 为豆包外层容器；真实输入多为 Semi textarea，带 data-testid="chat_input_input"
-  const attempts = [
-    page.locator('[data-testid="chat-input"][contenteditable="true"]').first(),
-    page.locator('[data-testid="chat-input"]').first(),
-    page.locator('[data-testid="chat_input_input"]').first(),
-    page.locator('[data-testid="chat_input"] [contenteditable="true"]').first(),
-    page.locator('[data-testid="chat_input"] textarea:not([readonly])').first(),
-    page.locator('[data-testid="chat_input"] [role="textbox"]').first(),
-    page.locator('div[contenteditable="true"]').last(),
-    page.locator('textarea:not([readonly])').last(),
-    page.locator('div[role="textbox"]').last(),
-  ];
-
-  let lastErr;
-  for (const loc of attempts) {
-    try {
-      await loc.waitFor({ state: 'visible', timeout: 5000 });
-      return loc;
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  throw new Error(
-    `未找到输入框（最后错误: ${lastErr?.message ?? 'timeout'}）。请在 config 中设置 webInputSelector。`,
-  );
-}
-
 export async function extractMessageNodes(page, cfg) {
-  const sel = cfg.webMessageSelector || '[data-testid="message_text_content"]';
+  const sel = effectiveMessageSelector(cfg);
   const maxHtml = Number(cfg.webMaxHtmlChars ?? 12_000);
   return page.locator(sel).evaluateAll(
     (els, max) =>
@@ -224,22 +194,13 @@ export async function withDoubaoSession(cfg, cwd, fn) {
   }
 }
 
-export function sessionHint(text, url) {
-  const t = (text || '').slice(0, 800);
-  const u = url || '';
-  const lostChat = u.startsWith('http') && !u.includes('/chat/');
-  if (
-    t.includes('无权限访问该会话') ||
-    t.includes('返回到首页') ||
-    lostChat
-  ) {
-    return [
-      '页面可能未带上登录态：在 Chrome 中打开豆包并登录 → F12 → Application → Cookies → https://www.doubao.com ，逐条复制或导出（须含 HttpOnly；不要用控制台 document.cookie，会缺登录关键项）。写入 doubao-cookies.txt。',
-      '确认 webChatUrl 里的会话 id 是当前账号下的对话；他人链接或已删除会话会提示无权限。',
-      '可试 config 中 webCookieInjectMode 改为 domain（少数环境 domain 比 url 更稳），或 web-chat --headed 看实际页面。',
-    ].join(' ');
-  }
-  return null;
+/**
+ * @param {string} text
+ * @param {string} url
+ * @param {Record<string, unknown>} [cfg] 传 `config` 时可按 webProvider / 域名选用豆包或 Claude 的提示文案
+ */
+export function sessionHint(text, url, cfg) {
+  return sessionHintForProvider(text, url, cfg ?? {});
 }
 
 /**
@@ -249,7 +210,7 @@ export function sessionHint(text, url) {
  * @param {Record<string, unknown>} [diagnosticsBase]
  */
 export async function readMessagesSnapshotOnPage(page, cfg, diagnosticsBase = {}) {
-  const sel = cfg.webMessageSelector || '[data-testid="message_text_content"]';
+  const sel = effectiveMessageSelector(cfg);
   await page
     .waitForSelector(sel, { state: 'attached', timeout: 25_000 })
     .catch(() => {});
@@ -258,7 +219,7 @@ export async function readMessagesSnapshotOnPage(page, cfg, diagnosticsBase = {}
   const bodySnippet = await page
     .evaluate(() => document.body?.innerText?.slice(0, 800) || '')
     .catch(() => '');
-  const hint = sessionHint(bodySnippet, page.url());
+  const hint = sessionHint(bodySnippet, page.url(), cfg);
   return {
     messages,
     count: messages.length,
@@ -338,14 +299,9 @@ export async function waitForAssistantReplyStable(
  * @param {Record<string, unknown>} [diagnosticsBase]
  */
 export async function sendPromptOnlyOnPage(page, cfg, promptText, diagnosticsBase = {}) {
-  const sel = cfg.webMessageSelector || '[data-testid="message_text_content"]';
-  await page
-    .waitForSelector(sel, { state: 'attached', timeout: 30_000 })
-    .catch(() => {});
+  const { before } = await waitChatReadyForProvider(page, cfg);
 
-  const before = await page.locator(sel).count();
-
-  const composer = await findComposer(page, cfg);
+  const composer = await findComposerForProvider(page, cfg);
   await composer.click();
   await composer.fill(promptText);
 
@@ -385,7 +341,7 @@ export async function sendPromptAndCollectOnPage(page, cfg, promptText, diagnost
   const bodySnippet = await page
     .evaluate(() => document.body?.innerText?.slice(0, 800) || '')
     .catch(() => '');
-  let hint = sessionHint(bodySnippet, page.url());
+  let hint = sessionHint(bodySnippet, page.url(), cfg);
   if (!replyMessage && messages.length > before) {
     const extra =
       '已出现新气泡但未解析到与提问不同的回复：可能页面结构变化，或回复与提问全文相同。可调大 webReplyWaitMs / webReplySettleMs。';

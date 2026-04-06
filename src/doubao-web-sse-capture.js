@@ -134,9 +134,12 @@ export function formatSseCaptureForDisplay(merged, cfg = {}) {
  * @param {ReturnType<typeof createSseCaptureState>} state
  * @param {number} startLineCount
  * @param {Record<string, unknown>} cfg
+ * @param {{ mark: (phase: string, extra?: string) => void } | null | undefined} [timingSink] 与 `webServeTimingLog` 配合
  * @returns {Promise<string>}
  */
-export async function waitForNewSseStable(state, startLineCount, cfg) {
+export async function waitForNewSseStable(state, startLineCount, cfg, timingSink) {
+  const mark = timingSink?.mark;
+  const tLog = cfg.webServeTimingLog === true;
   const replyWait = Number(cfg.webReplyWaitMs ?? 90_000);
   const settle = Number(cfg.webReplySettleMs ?? 2000);
   const poll = Number(cfg.webReplyPollMs ?? 400);
@@ -146,8 +149,19 @@ export async function waitForNewSseStable(state, startLineCount, cfg) {
   let stableAccum = 0;
   let prev = /** @type {string | null} */ (null);
   let noCompletionPolls = 0;
+  let pollCount = 0;
+  let sawCompletion = false;
+  let sawText = false;
+  /** @type {number | null} */
+  let lastGrowLogAt = null;
+
+  mark?.(
+    'sse-wait 开始',
+    `settle=${settle}ms poll=${poll}ms giveUpNoNew=${giveUpNoNewMs}ms startLines=${startLineCount}`,
+  );
 
   while (Date.now() < deadline) {
+    pollCount += 1;
     const snap = state.snapshot();
     const newCompletions = snap.lines
       .slice(startLineCount)
@@ -155,9 +169,22 @@ export async function waitForNewSseStable(state, startLineCount, cfg) {
     if (newCompletions.length === 0) {
       noCompletionPolls += 1;
       if (noCompletionPolls >= needPollsNoNew) {
+        if (tLog) {
+          console.log(
+            `[web-serve timing] sse-wait 放弃：${giveUpNoNewMs}ms 内无新 cdp-completion（轮询 ${pollCount} 次）`,
+          );
+        }
+        mark?.('sse-wait 结束(无 completion)', `polls=${pollCount}`);
         return '';
       }
     } else {
+      if (!sawCompletion) {
+        sawCompletion = true;
+        mark?.(
+          'sse-wait 首条 cdp-completion 入缓冲',
+          `blocks=${newCompletions.length}`,
+        );
+      }
       noCompletionPolls = 0;
     }
 
@@ -168,12 +195,30 @@ export async function waitForNewSseStable(state, startLineCount, cfg) {
     const formatted = formatSseCaptureForDisplay(lastBody, cfg).trim();
 
     if (formatted) {
+      if (!sawText) {
+        sawText = true;
+        mark?.('sse-wait 首段可展示正文', `len=${formatted.length}`);
+      }
       if (formatted === prev) {
         stableAccum += poll;
         if (stableAccum >= settle) {
+          mark?.(
+            'sse-wait 稳定返回',
+            `polls=${pollCount} len=${formatted.length} settleWindow=${settle}ms`,
+          );
           return formatted;
         }
       } else {
+        const now = Date.now();
+        if (
+          tLog &&
+          (lastGrowLogAt === null || now - lastGrowLogAt >= 2000)
+        ) {
+          console.log(
+            `[web-serve timing] sse-wait 正文仍在变 len=${formatted.length} poll=#${pollCount}`,
+          );
+          lastGrowLogAt = now;
+        }
         prev = formatted;
         stableAccum = 0;
       }
@@ -192,7 +237,14 @@ export async function waitForNewSseStable(state, startLineCount, cfg) {
     newCompletions.length > 0
       ? newCompletions[newCompletions.length - 1].body
       : '';
-  return formatSseCaptureForDisplay(lastBody, cfg).trim();
+  const tail = formatSseCaptureForDisplay(lastBody, cfg).trim();
+  if (tLog) {
+    console.log(
+      `[web-serve timing] sse-wait 达上限 webReplyWaitMs=${replyWait}ms polls=${pollCount} tailLen=${tail.length}`,
+    );
+  }
+  mark?.('sse-wait 结束(超时或尾部)', `polls=${pollCount}`);
+  return tail;
 }
 
 /**
@@ -543,6 +595,9 @@ async function installCdpStreamCapture(page, state, cfg, urlFilter, debug) {
   const requestIdToUrl = new Map();
   /** @type {Set<string>} */
   const sseTracked = new Set();
+  /** responseReceived → loadingFinished / getResponseBody 间隔用 */
+  /** @type {Map<string, number>} */
+  const cdpSseResponseT0 = new Map();
 
   client.on('Network.webSocketCreated', (e) => {
     const url = e.url || '';
@@ -591,21 +646,29 @@ async function installCdpStreamCapture(page, state, cfg, urlFilter, debug) {
     if (!sseMime && !looksLikeSseOrCompletion(url)) return;
     requestIdToUrl.set(e.requestId, url);
     sseTracked.add(e.requestId);
+    if (cfg.webServeTimingLog === true) {
+      cdpSseResponseT0.set(e.requestId, Date.now());
+    }
   });
 
   client.on('Network.loadingFailed', (e) => {
     sseTracked.delete(e.requestId);
     requestIdToUrl.delete(e.requestId);
+    cdpSseResponseT0.delete(e.requestId);
   });
 
   client.on('Network.loadingFinished', async (e) => {
     if (!sseTracked.delete(e.requestId)) return;
     const url = requestIdToUrl.get(e.requestId) || '';
     requestIdToUrl.delete(e.requestId);
+    const respT0 = cdpSseResponseT0.get(e.requestId);
+    cdpSseResponseT0.delete(e.requestId);
     try {
+      const gb0 = Date.now();
       const res = await client.send('Network.getResponseBody', {
         requestId: e.requestId,
       });
+      const gb1 = Date.now();
       const bodyStr = res.base64Encoded
         ? Buffer.from(res.body, 'base64').toString('utf8')
         : String(res.body || '');
@@ -628,6 +691,16 @@ async function installCdpStreamCapture(page, state, cfg, urlFilter, debug) {
         } catch {
           // ignore
         }
+      }
+      if (cfg.webServeTimingLog === true && bodyStr.length > 0) {
+        const kindLog = trimmed
+          ? kindForCdpFinishedBody(url, trimmed)
+          : 'empty';
+        const sinceRx =
+          respT0 != null ? `${gb1 - respT0}ms` : 'n/a';
+        console.log(
+          `[web-serve timing] cdp SSE 体入缓冲 | getResponseBody ${gb1 - gb0}ms | 自 responseReceived ${sinceRx} | ${bodyStr.length}b kind=${kindLog} | ${url.slice(0, 88)}`,
+        );
       }
       if (debug && bodyStr.length > 0) {
         console.error(

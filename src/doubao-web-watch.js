@@ -2,6 +2,7 @@ import { chromium } from 'playwright';
 import { resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { extractMessageNodes } from './doubao-web.js';
+import { effectiveMessageSelector } from './web-provider.js';
 import {
   createSseCaptureState,
   installSsePageHooks,
@@ -119,7 +120,7 @@ export function createWatchEmitter(captureMode = 'dom') {
  * @param {(messages: Awaited<ReturnType<typeof extractMessageNodes>>) => void} onChange
  */
 async function installMutationBridge(page, cfg, onChange) {
-  const sel = cfg.webMessageSelector || '[data-testid="message_text_content"]';
+  const sel = effectiveMessageSelector(cfg);
   const debounceMs = Number(cfg.webWatchMutationDebounceMs ?? 400);
   await page.exposeBinding('__doubaoWatchNotify', async () => {
     const messages = await extractMessageNodes(page, cfg);
@@ -183,7 +184,7 @@ export async function runWebWatch(page, cfg, options = {}) {
   const useMutation = options.useMutation !== false && cfg.webWatchUseMutation !== false;
 
   const { emitIfChanged } = createWatchEmitter('dom');
-  const sel = cfg.webMessageSelector || '[data-testid="message_text_content"]';
+  const sel = effectiveMessageSelector(cfg);
 
   await page.waitForSelector(sel, { state: 'attached', timeout: 25_000 }).catch(() => {});
   await sleep(Number(cfg.webDomSettleMs ?? 800));
