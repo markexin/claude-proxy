@@ -137,6 +137,45 @@ function chatGptDataPayloadToAssistantText(payload) {
   return '';
 }
 
+/** 页面 hook / CDP 增量行合并为助手正文（不必等 loadingFinished）。 */
+const STREAM_LINE_KINDS = new Set([
+  'fetch-sse',
+  'fetch-sse-tail',
+  'eventsource-message',
+  'cdp-completion',
+  'cdp-http-body',
+]);
+
+/**
+ * @param {ReturnType<typeof createSseCaptureState>} state
+ * @param {number} startLineCount
+ * @param {Record<string, unknown>} cfg
+ */
+export function extractStreamTextSince(state, startLineCount, cfg) {
+  const snap = state.snapshot();
+  const slice = snap.lines.slice(startLineCount).filter((l) => {
+    if (STREAM_LINE_KINDS.has(l.kind)) return true;
+    return l.kind.startsWith('cdp-') || l.kind.startsWith('fetch-');
+  });
+  if (!slice.length) return '';
+
+  let last = '';
+  for (const line of slice) {
+    const b = String(line.body || '').trim();
+    if (!b || isJunkAssistantReplyText(b)) continue;
+    if (!b.startsWith('{')) {
+      last = b;
+      continue;
+    }
+    const piece = chatGptDataPayloadToAssistantText(b);
+    if (piece) last = piece;
+  }
+  if (last) return last;
+
+  const wire = slice.map((l) => `data: ${l.body}`).join('\n');
+  return formatSseCaptureForDisplay(wire, cfg);
+}
+
 /**
  * 将缓冲区合并结果格式化为助手可读纯文本（去掉 event:/data: 外壳与元事件）。
  * @param {string} merged
@@ -224,24 +263,30 @@ export async function waitForNewSseStable(state, startLineCount, cfg, timingSink
     const newCompletions = snap.lines
       .slice(startLineCount)
       .filter((l) => l.kind === 'cdp-completion');
-    if (newCompletions.length === 0) {
+    const incremental = extractStreamTextSince(state, startLineCount, cfg).trim();
+
+    if (newCompletions.length === 0 && !incremental) {
       noCompletionPolls += 1;
       if (noCompletionPolls >= needPollsNoNew) {
         if (tLog) {
           console.log(
-            `[web-serve timing] sse-wait 放弃：${giveUpNoNewMs}ms 内无新 cdp-completion（轮询 ${pollCount} 次）`,
+            `[web-serve timing] sse-wait 放弃：${giveUpNoNewMs}ms 内无新流式数据（轮询 ${pollCount} 次）`,
           );
         }
         mark?.('sse-wait 结束(无 completion)', `polls=${pollCount}`);
         return '';
       }
     } else {
-      if (!sawCompletion) {
+      if (!sawCompletion && newCompletions.length > 0) {
         sawCompletion = true;
         mark?.(
           'sse-wait 首条 cdp-completion 入缓冲',
           `blocks=${newCompletions.length}`,
         );
+      }
+      if (incremental && !sawText) {
+        sawText = true;
+        mark?.('sse-wait 首段增量正文', `len=${incremental.length}`);
       }
       noCompletionPolls = 0;
     }
@@ -250,7 +295,9 @@ export async function waitForNewSseStable(state, startLineCount, cfg, timingSink
       newCompletions.length > 0
         ? newCompletions[newCompletions.length - 1].body
         : '';
-    const formatted = formatSseCaptureForDisplay(lastBody, cfg).trim();
+    const formatted = (
+      lastBody ? formatSseCaptureForDisplay(lastBody, cfg) : incremental
+    ).trim();
 
     if (formatted) {
       if (!sawText) {
@@ -291,11 +338,15 @@ export async function waitForNewSseStable(state, startLineCount, cfg, timingSink
   const newCompletions = snap.lines
     .slice(startLineCount)
     .filter((l) => l.kind === 'cdp-completion');
-  const lastBody =
+  const tailBody =
     newCompletions.length > 0
       ? newCompletions[newCompletions.length - 1].body
       : '';
-  const tail = formatSseCaptureForDisplay(lastBody, cfg).trim();
+  const tail = (
+    tailBody
+      ? formatSseCaptureForDisplay(tailBody, cfg)
+      : extractStreamTextSince(state, startLineCount, cfg)
+  ).trim();
   if (tLog) {
     console.log(
       `[web-serve timing] sse-wait 达上限 webReplyWaitMs=${replyWait}ms polls=${pollCount} tailLen=${tail.length}`,
@@ -393,9 +444,14 @@ export function createSseCaptureState(cfg) {
       if (!body) return;
       const bypassNormalize = payload.raw === true;
       if (!bypassNormalize && cfg.webSseNormalizeAnthropic !== false) {
-        const n = normalizeAnthropicSseLine(body);
-        if (!n) return;
-        body = n;
+        const chatPiece = chatGptDataPayloadToAssistantText(body);
+        if (chatPiece) {
+          body = chatPiece;
+        } else {
+          const n = normalizeAnthropicSseLine(body);
+          if (!n) return;
+          body = n;
+        }
       }
       lines.push({
         t: Date.now(),

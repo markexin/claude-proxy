@@ -3,22 +3,19 @@ import { randomUUID } from 'node:crypto';
 import {
   attachDoubaoAutomation,
   detachDoubaoAutomation,
+  ensureActiveChatPage,
 } from './doubao-web-watch.js';
 import {
   createSseCaptureState,
   installSsePageHooks,
   normalizeMessageCapture,
-  waitForNewSseStable,
-  isJunkAssistantReplyText,
 } from './doubao-web-sse-capture.js';
+import { waitForReplyReady } from './web-reply-wait.js';
 import {
   readMessagesSnapshotOnPage,
   sendPromptAndCollectOnPage,
   sendPromptOnlyOnPage,
-  waitForAssistantReplyStable,
-  pickReplyMessage,
   sessionHint,
-  extractMessageNodes,
 } from './doubao-web.js';
 import {
   createSessionRotationState,
@@ -366,11 +363,12 @@ export async function startWebServe(cfg, cwd, options = {}) {
   const token = envToken || cfgToken;
 
   const att = await attachDoubaoAutomation(cfg, cwd, options);
-  const { page } = att;
 
   const msgCapture = normalizeMessageCapture(cfg, options);
   /** @type {ReturnType<typeof createSseCaptureState> | null} */
   let sseState = null;
+  /** @type {import('playwright').Page | null} */
+  let sseHooksPage = null;
   const sessionRotation = createSessionRotationState(cfg);
   if (sessionRotation.enabled) {
     console.error(
@@ -379,7 +377,8 @@ export async function startWebServe(cfg, cwd, options = {}) {
   }
   if (msgCapture === 'sse') {
     sseState = createSseCaptureState(cfg);
-    await installSsePageHooks(page, sseState, cfg);
+    await installSsePageHooks(att.page, sseState, cfg);
+    sseHooksPage = att.page;
     console.error(
       '[web-serve] GET /messages：SSE/CDP 缓冲；POST /chat：默认先等 SSE/CDP 稳定再返回（快），无正文再回退 DOM 等待（webServePreferSseReply:false 可改回先 DOM）',
     );
@@ -403,6 +402,17 @@ export async function startWebServe(cfg, cwd, options = {}) {
       () => {},
     );
     return result;
+  }
+
+  /** 请求前确保 CDP 标签页仍有效；换页后重装 SSE hook */
+  async function getActivePage() {
+    const page = await ensureActiveChatPage(att, cfg);
+    if (msgCapture === 'sse' && sseState && page !== sseHooksPage) {
+      await installSsePageHooks(page, sseState, cfg);
+      sseHooksPage = page;
+      console.error(`[web-serve] 已切换到聊天标签页并重装 SSE 抓包：${page.url()}`);
+    }
+    return page;
   }
 
   const server = http.createServer(async (req, res) => {
@@ -529,6 +539,7 @@ export async function startWebServe(cfg, cwd, options = {}) {
 
       if (req.method === 'GET' && url.pathname === '/messages') {
         const out = await runExclusive(async () => {
+          const page = await getActivePage();
           if (sseState) {
             const snap = sseState.snapshot();
             const messages = sseState.toMessageNodesForWatch();
@@ -638,12 +649,16 @@ export async function startWebServe(cfg, cwd, options = {}) {
         }
 
         const out = await runExclusive(async () => {
+          let page = await getActivePage();
           const rotation = await maybeRotateSessionBeforeChat(
             page,
             cfg,
             sessionRotation,
             sseState,
           );
+          if (rotation.rotated) {
+            page = await getActivePage();
+          }
 
           if (sseState) {
             const timingSink = createTimingSink(cfg);
@@ -652,10 +667,6 @@ export async function startWebServe(cfg, cwd, options = {}) {
               timingSink?.mark('会话轮换完成', rotation.newSessionUrl ?? '');
             }
             const startLc = sseState.snapshot().lines.length;
-            const replyWait = Number(cfg.webReplyWaitMs ?? 90_000);
-            const settle = Number(cfg.webReplySettleMs ?? 2000);
-            const poll = Number(cfg.webReplyPollMs ?? 400);
-            const preferSse = cfg.webServePreferSseReply !== false;
 
             const { before, diagnosticsBase } = await sendPromptOnlyOnPage(
               page,
@@ -665,67 +676,24 @@ export async function startWebServe(cfg, cwd, options = {}) {
             );
             timingSink?.mark('sendPromptOnlyOnPage 完成', `before=${before}`);
 
-            const t0 = Date.now();
-            /** @type {Awaited<ReturnType<typeof extractMessageNodes>>} */
-            let messages;
-            /** @type {string} */
-            let replyTextSse;
+            const ready = await waitForReplyReady(
+              page,
+              cfg,
+              promptText,
+              sseState,
+              startLc,
+              timingSink,
+            );
+            timingSink?.mark(
+              'waitForReplyReady 结束',
+              `source=${ready.source} len=${ready.replyText.length}`,
+            );
 
-            if (preferSse) {
-              replyTextSse = await waitForNewSseStable(
-                sseState,
-                startLc,
-                cfg,
-                timingSink,
-              );
-              timingSink?.mark('waitForNewSseStable 结束（prefer SSE）');
-              messages = await extractMessageNodes(page, cfg);
-              timingSink?.mark('extractMessageNodes 完成');
-              if (!String(replyTextSse || '').trim()) {
-                const elapsed = Date.now() - t0;
-                const domBudget = Math.max(5000, replyWait - elapsed);
-                timingSink?.mark(
-                  'DOM 兜底 waitForAssistantReplyStable 开始',
-                  `budget=${domBudget}ms`,
-                );
-                messages = await waitForAssistantReplyStable(
-                  page,
-                  cfg,
-                  promptText,
-                  domBudget,
-                  settle,
-                  poll,
-                );
-                timingSink?.mark('DOM 兜底 waitForAssistantReplyStable 结束');
-              }
-            } else {
-              timingSink?.mark('先 DOM waitForAssistantReplyStable 开始');
-              messages = await waitForAssistantReplyStable(
-                page,
-                cfg,
-                promptText,
-                replyWait,
-                settle,
-                poll,
-              );
-              timingSink?.mark('先 DOM waitForAssistantReplyStable 结束');
-              const elapsed = Date.now() - t0;
-              const sseBudget = Math.max(5000, replyWait - elapsed);
-              replyTextSse = await waitForNewSseStable(
-                sseState,
-                startLc,
-                {
-                  ...cfg,
-                  webReplyWaitMs: sseBudget,
-                },
-                timingSink,
-              );
-              timingSink?.mark('waitForNewSseStable 结束（SSE 余量）');
-            }
-
-            timingSink?.mark('组装 diagnostics / 选 reply 前');
-            const promptTrim = String(promptText).trim();
-            const replyMessage = pickReplyMessage(messages, promptTrim);
+            const messages = ready.messages;
+            const replyMessage = ready.replyMessage;
+            const replyText = String(ready.replyText ?? '').trim();
+            const replyTextDom = String(ready.replyTextDom ?? '').trim();
+            const sseTrim = String(ready.replyTextSse ?? '').trim();
             const lastDom = messages.length ? messages[messages.length - 1] : null;
             const bodySnippet = await page
               .evaluate(() => document.body?.innerText?.slice(0, 800) || '')
@@ -735,18 +703,6 @@ export async function startWebServe(cfg, cwd, options = {}) {
               const extra =
                 '已出现新气泡但未解析到与提问不同的回复：可能页面结构变化，或回复与提问全文相同。可调大 webReplyWaitMs / webReplySettleMs。';
               hint = hint ? `${hint} ${extra}` : extra;
-            }
-
-            const replyTextDom = replyMessage
-              ? String(replyMessage.text ?? '').trim()
-              : '';
-            const sseTrim = String(replyTextSse || '').trim();
-            let replyText = sseTrim || replyTextDom;
-            if (isJunkAssistantReplyText(sseTrim)) {
-              replyText = replyTextDom;
-            }
-            if (isJunkAssistantReplyText(replyText) && replyTextDom) {
-              replyText = replyTextDom;
             }
 
             return {
@@ -759,6 +715,7 @@ export async function startWebServe(cfg, cwd, options = {}) {
               replyText,
               replyTextSse: sseTrim,
               replyTextDom,
+              replySource: ready.source,
               lastMessage: replyMessage ?? lastDom,
               lastDomMessage: lastDom,
               diagnostics: { ...diagnosticsBase, finalUrl: page.url() },

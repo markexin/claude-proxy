@@ -117,6 +117,10 @@ export async function submitComposerChatgpt(page, composer, cfg) {
  * @param {Record<string, unknown>} cfg
  */
 export async function waitChatReadyChatgpt(page, cfg) {
+  if (page.isClosed()) {
+    throw new Error('ChatGPT 标签页已关闭，请在 Chrome 中重新打开 chatgpt.com');
+  }
+
   await page
     .locator('#prompt-textarea, [data-testid="prompt-textarea"]')
     .first()
@@ -127,8 +131,18 @@ export async function waitChatReadyChatgpt(page, cfg) {
     String(cfg.webMessageSelector ?? '').trim() || CHATGPT_DEFAULT_MESSAGE_SELECTOR;
   await page.waitForSelector(sel, { state: 'attached', timeout: 12_000 }).catch(() => {});
 
-  const before = await page.locator(sel).count();
-  return { before };
+  try {
+    const before = await page.locator(sel).count();
+    return { before };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('closed') || page.isClosed()) {
+      throw new Error(
+        'ChatGPT 标签页在读取消息时被关闭。请保持 CDP Chrome 中的 chatgpt.com 标签页打开，勿在会话轮换时手动关 tab。',
+      );
+    }
+    throw e;
+  }
 }
 
 /**
@@ -171,6 +185,10 @@ export function sessionHintChatgpt(text, url) {
  * @returns {Promise<{ method: string; url: string }>}
  */
 export async function startNewChatgptSession(page, cfg) {
+  if (page.isClosed()) {
+    throw new Error('无法开新对话：当前标签页已关闭');
+  }
+
   const navTimeout = Number(cfg.webNavigationTimeoutMs ?? 90_000);
   let origin = 'https://chatgpt.com';
   try {
@@ -184,15 +202,18 @@ export async function startNewChatgptSession(page, cfg) {
   const newChatSelectors = [
     '[data-testid="create-new-chat-button"]',
     '[data-testid="sidebar-new-chat-button"]',
-    'nav a[href="/"]',
-    'a[href="/"]',
+    'button:has-text("New chat")',
+    'button:has-text("新聊天")',
   ];
 
   for (const sel of newChatSelectors) {
     const btn = page.locator(sel).first();
     try {
       if (await btn.isVisible({ timeout: 1500 })) {
-        await btn.click();
+        await btn.click({ timeout: 5000 });
+        await page
+          .waitForURL(/chatgpt\.com|chat\.openai\.com/, { timeout: navTimeout })
+          .catch(() => {});
         await waitChatReadyChatgpt(page, cfg);
         return { method: 'click', url: page.url() };
       }
@@ -208,4 +229,25 @@ export async function startNewChatgptSession(page, cfg) {
   });
   await waitChatReadyChatgpt(page, cfg);
   return { method: 'goto', url: page.url() };
+}
+
+/**
+ * ChatGPT 是否仍在生成（Stop 按钮可见即仍在流式输出）。
+ * @param {import('playwright').Page} page
+ */
+export async function isChatgptGenerating(page) {
+  if (page.isClosed()) return false;
+  const selectors = [
+    '[data-testid="stop-button"]',
+    'button[aria-label="Stop streaming"]',
+    'button[aria-label="停止生成"]',
+  ];
+  for (const sel of selectors) {
+    try {
+      if (await page.locator(sel).first().isVisible()) return true;
+    } catch {
+      // ignore
+    }
+  }
+  return false;
 }

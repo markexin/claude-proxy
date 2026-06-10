@@ -2,7 +2,7 @@ import { chromium } from 'playwright';
 import { resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { extractMessageNodes } from './doubao-web.js';
-import { effectiveMessageSelector } from './web-provider.js';
+import { effectiveMessageSelector, resolveWebProvider } from './web-provider.js';
 import {
   createSseCaptureState,
   installSsePageHooks,
@@ -37,6 +37,7 @@ function pageUrlMatchesChatSite(/** @type {string} */ url, /** @type {string[]} 
 export async function findDoubaoPageInBrowser(browser, cfg) {
   const hint = (cfg.webChatUrl || 'https://www.doubao.com').trim();
   const matchers = chatPageUrlMatchers(cfg);
+  const provider = resolveWebProvider(cfg);
   let pathname = '';
   try {
     pathname = new URL(hint).pathname;
@@ -45,8 +46,11 @@ export async function findDoubaoPageInBrowser(browser, cfg) {
   }
   /** @type {import('playwright').Page | null} */
   let best = null;
+  /** @type {import('playwright').Page | null} */
+  let chatgptAny = null;
   for (const context of browser.contexts()) {
     for (const page of context.pages()) {
+      if (page.isClosed()) continue;
       let u = '';
       try {
         u = page.url();
@@ -54,11 +58,66 @@ export async function findDoubaoPageInBrowser(browser, cfg) {
         continue;
       }
       if (!pageUrlMatchesChatSite(u, matchers)) continue;
+
+      if (provider === 'chatgpt') {
+        chatgptAny = page;
+        if (
+          u.includes('/c/') ||
+          u.replace(/\/$/, '').endsWith('chatgpt.com') ||
+          u.replace(/\/$/, '').endsWith('chat.openai.com')
+        ) {
+          best = page;
+        }
+        continue;
+      }
+
       if (!best) best = page;
       if (pathname && u.includes(pathname)) best = page;
     }
   }
+  if (provider === 'chatgpt') {
+    return best || chatgptAny;
+  }
   return best;
+}
+
+/**
+ * CDP 模式下若当前 Page 已关闭或失效，重新在浏览器里找/打开聊天标签。
+ * @param {{ page: import('playwright').Page; browser: import('playwright').Browser | null; context: import('playwright').BrowserContext | null }} att
+ * @param {Record<string, unknown>} cfg
+ */
+export async function ensureActiveChatPage(att, cfg) {
+  const cur = att.page;
+  if (cur && !cur.isClosed()) {
+    try {
+      await cur.evaluate(() => true);
+      return cur;
+    } catch {
+      // stale handle
+    }
+  }
+  if (att.context) {
+    const pages = att.context.pages().filter((p) => !p.isClosed());
+    const found = pages.find((p) => {
+      try {
+        return pageUrlMatchesChatSite(p.url(), chatPageUrlMatchers(cfg));
+      } catch {
+        return false;
+      }
+    });
+    if (found) {
+      att.page = found;
+      return found;
+    }
+  }
+  if (!att.browser) {
+    throw new Error(
+      '浏览器标签页已关闭。请在 Chrome 中重新打开 https://chatgpt.com 并保持该标签页，勿手动关闭；然后重试请求。',
+    );
+  }
+  const page = await ensureDoubaoPage(att.browser, cfg);
+  att.page = page;
+  return page;
 }
 
 /** @param {import('playwright').Browser} browser */
