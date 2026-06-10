@@ -16,7 +16,7 @@ export function resolveSseUrlFilter(cfg) {
     const h = new URL(String(cfg.webChatUrl || 'https://www.doubao.com')).hostname;
     if (h.endsWith('doubao.com')) return 'doubao.com';
     if (h.includes('chatgpt.com') || h.includes('chat.openai.com')) {
-      return 'chatgpt.com';
+      return 'backend-api/conversation';
     }
     return h;
   } catch {
@@ -99,20 +99,37 @@ function anthropicDataPayloadToAssistantDelta(payload) {
 }
 
 /**
+ * ChatGPT 握手/控制帧（conduit_token 等），不是助手正文。
+ * @param {string} text
+ */
+export function isJunkAssistantReplyText(text) {
+  const t = String(text || '').trim();
+  if (!t) return true;
+  if (t.includes('conduit_token')) return true;
+  if (/^\s*\{\s*"status"\s*:\s*"ok"/.test(t) && !t.includes('"message"')) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * ChatGPT `/backend-api/conversation` SSE：每条 data 常带完整累积正文于 message.content.parts[0]。
  * @param {string} payload
  */
 function chatGptDataPayloadToAssistantText(payload) {
   const p = String(payload).trim();
   if (!p || p === '[DONE]' || !p.startsWith('{')) return '';
+  if (isJunkAssistantReplyText(p)) return '';
   try {
     const o = JSON.parse(p);
+    if (o?.conduit_token || (o?.status === 'ok' && !o?.message)) return '';
     const delta = o?.choices?.[0]?.delta?.content;
-    if (typeof delta === 'string') return delta;
+    if (typeof delta === 'string' && !isJunkAssistantReplyText(delta)) return delta;
     const role = o?.message?.author?.role ?? o?.author?.role;
     const parts = o?.message?.content?.parts ?? o?.content?.parts;
     if (role === 'assistant' && Array.isArray(parts) && typeof parts[0] === 'string') {
-      return parts[0];
+      const piece = parts[0];
+      return isJunkAssistantReplyText(piece) ? '' : piece;
     }
   } catch {
     // ignore
@@ -163,9 +180,10 @@ export function formatSseCaptureForDisplay(merged, cfg = {}) {
       const piece = chatGptDataPayloadToAssistantText(dm[1]);
       if (piece) last = piece;
     }
-    if (last) return last.trim();
+    if (last && !isJunkAssistantReplyText(last)) return last.trim();
   }
 
+  if (isJunkAssistantReplyText(m)) return '';
   return m;
 }
 

@@ -50,7 +50,11 @@ const defaults = {
   webServeCorsOrigin: '',
   webServeChatResponseFormat: 'openai',
   webOpenAiCompatModel: 'local/web-bridge',
-  webServeAssumeOpenAiStream: true,
+  /** 非流式 JSON 里 message.reasoning_content（无思考链时为空字符串） */
+  webOpenAiIncludeReasoningContent: true,
+  webOpenAiSystemFingerprint: 'fp_local_web_bridge',
+  /** false 时 /v1/chat/completions 默认返回整段 chat.completion JSON（DeepSeek 风格） */
+  webServeAssumeOpenAiStream: false,
   /** `true` 时 web-serve 与 CDP SSE 抓包用 console.log 打耗时 */
   webServeTimingLog: false,
 };

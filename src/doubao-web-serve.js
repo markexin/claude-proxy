@@ -1,5 +1,5 @@
 import http from 'node:http';
-import { randomBytes } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import {
   attachDoubaoAutomation,
   detachDoubaoAutomation,
@@ -9,6 +9,7 @@ import {
   installSsePageHooks,
   normalizeMessageCapture,
   waitForNewSseStable,
+  isJunkAssistantReplyText,
 } from './doubao-web-sse-capture.js';
 import {
   readMessagesSnapshotOnPage,
@@ -119,31 +120,43 @@ function toOpenAiChatCompletion(legacy, promptText, modelFromRequest, cfg) {
   ).trim();
   const pt = roughTokenCount(promptText);
   const ct = roughTokenCount(content);
+  const reasoning = String(legacy.reasoningText ?? '').trim();
+  const rt = roughTokenCount(reasoning);
+
+  /** @type {Record<string, string>} */
+  const message = {
+    role: 'assistant',
+    content,
+  };
+  if (cfg.webOpenAiIncludeReasoningContent !== false) {
+    message.reasoning_content = reasoning;
+  }
+
   return {
-    id: randomBytes(16).toString('hex'),
+    id: randomUUID(),
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
     model,
     choices: [
       {
         index: 0,
-        message: {
-          role: 'assistant',
-          content,
-        },
+        message,
+        logprobs: null,
         finish_reason: 'stop',
       },
     ],
     usage: {
       prompt_tokens: pt,
-      completion_tokens: ct,
-      total_tokens: pt + ct,
-      completion_tokens_details: { reasoning_tokens: 0 },
+      completion_tokens: ct + rt,
+      total_tokens: pt + ct + rt,
       prompt_tokens_details: { cached_tokens: 0 },
+      completion_tokens_details: { reasoning_tokens: rt },
       prompt_cache_hit_tokens: 0,
       prompt_cache_miss_tokens: pt,
     },
-    system_fingerprint: '',
+    system_fingerprint: String(
+      cfg.webOpenAiSystemFingerprint || 'fp_local_web_bridge',
+    ),
   };
 }
 
@@ -707,7 +720,13 @@ export async function startWebServe(cfg, cwd, options = {}) {
               ? String(replyMessage.text ?? '').trim()
               : '';
             const sseTrim = String(replyTextSse || '').trim();
-            const replyText = sseTrim || replyTextDom;
+            let replyText = sseTrim || replyTextDom;
+            if (isJunkAssistantReplyText(sseTrim)) {
+              replyText = replyTextDom;
+            }
+            if (isJunkAssistantReplyText(replyText) && replyTextDom) {
+              replyText = replyTextDom;
+            }
 
             return {
               capture: 'sse',
