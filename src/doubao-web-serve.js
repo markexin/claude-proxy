@@ -20,6 +20,11 @@ import {
   sessionHint,
   extractMessageNodes,
 } from './doubao-web.js';
+import {
+  createSessionRotationState,
+  maybeRotateSessionBeforeChat,
+  recordSessionChatTurn,
+} from './web-session-rotate.js';
 
 /** UTF-8 字节粗算 token（约 4 字节/token，与多数本地估算一致） */
 function roughTokenCount(text) {
@@ -366,6 +371,12 @@ export async function startWebServe(cfg, cwd, options = {}) {
   const msgCapture = normalizeMessageCapture(cfg, options);
   /** @type {ReturnType<typeof createSseCaptureState> | null} */
   let sseState = null;
+  const sessionRotation = createSessionRotationState(cfg);
+  if (sessionRotation.enabled) {
+    console.error(
+      `[web-serve] 会话轮换已启用：每 ${sessionRotation.nextRotateAt} 轮左右开新 ChatGPT 对话（webSessionRotateMin/Max）`,
+    );
+  }
   if (msgCapture === 'sse') {
     sseState = createSseCaptureState(cfg);
     await installSsePageHooks(page, sseState, cfg);
@@ -627,9 +638,19 @@ export async function startWebServe(cfg, cwd, options = {}) {
         }
 
         const out = await runExclusive(async () => {
+          const rotation = await maybeRotateSessionBeforeChat(
+            page,
+            cfg,
+            sessionRotation,
+            sseState,
+          );
+
           if (sseState) {
             const timingSink = createTimingSink(cfg);
             timingSink?.mark('请求已出队（互斥开始）', `sseLines=${sseState.snapshot().lines.length}`);
+            if (rotation.rotated) {
+              timingSink?.mark('会话轮换完成', rotation.newSessionUrl ?? '');
+            }
             const startLc = sseState.snapshot().lines.length;
             const replyWait = Number(cfg.webReplyWaitMs ?? 90_000);
             const settle = Number(cfg.webReplySettleMs ?? 2000);
@@ -742,13 +763,24 @@ export async function startWebServe(cfg, cwd, options = {}) {
               lastDomMessage: lastDom,
               diagnostics: { ...diagnosticsBase, finalUrl: page.url() },
               hint,
+              sessionRotation: rotation.rotated ? rotation : undefined,
+              sessionTurnCount: sessionRotation.turnCount + 1,
+              sessionNextRotateAt: sessionRotation.nextRotateAt,
             };
           }
 
-          return sendPromptAndCollectOnPage(page, cfg, promptText, {
+          const domOut = await sendPromptAndCollectOnPage(page, cfg, promptText, {
             source: 'web-serve',
-          }).then((domOut) => ({ ...domOut, capture: 'dom' }));
+          });
+          return {
+            ...domOut,
+            capture: 'dom',
+            sessionRotation: rotation.rotated ? rotation : undefined,
+            sessionTurnCount: sessionRotation.turnCount + 1,
+            sessionNextRotateAt: sessionRotation.nextRotateAt,
+          };
         });
+        recordSessionChatTurn(sessionRotation);
         if (openAiShapeGlobal && wantStream) {
           writeOpenAiChatCompletionStream(
             res,

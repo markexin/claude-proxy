@@ -57,6 +57,15 @@ const defaults = {
   webServeAssumeOpenAiStream: false,
   /** `true` 时 web-serve 与 CDP SSE 抓包用 console.log 打耗时 */
   webServeTimingLog: false,
+  /** 每 N 轮对话后开新网页会话；0 表示用 min/max 随机区间 */
+  webSessionRotateEvery: 0,
+  /** 随机轮换区间（含端点），如 20–30 表示每 20~30 轮开新 ChatGPT 对话 */
+  webSessionRotateMin: 0,
+  webSessionRotateMax: 0,
+  /** 仅对这些 provider 轮换：`chatgpt` / `all` / 逗号分隔 */
+  webSessionRotateProviders: 'chatgpt',
+  /** ChatGPT 开新对话时的 URL，默认 `${webChatUrl.origin}/` */
+  webNewChatUrl: '',
 };
 
 export function loadConfig(cwd = process.cwd()) {

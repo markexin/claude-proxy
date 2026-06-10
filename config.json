@@ -25,5 +25,8 @@
   "webOpenAiCompatModels": ["gpt-5.5"],
   "webServeAssumeOpenAiStream": false,
   "webOpenAiIncludeReasoningContent": true,
-  "webOpenAiSystemFingerprint": "fp_local_web_bridge"
+  "webOpenAiSystemFingerprint": "fp_local_web_bridge",
+  "webSessionRotateMin": 20,
+  "webSessionRotateMax": 30,
+  "webSessionRotateProviders": "chatgpt"
 }

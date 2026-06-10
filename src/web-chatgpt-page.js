@@ -163,3 +163,49 @@ export function sessionHintChatgpt(text, url) {
   }
   return null;
 }
+
+/**
+ * 开新 ChatGPT 对话（侧边栏按钮或跳转首页）。
+ * @param {import('playwright').Page} page
+ * @param {Record<string, unknown>} cfg
+ * @returns {Promise<{ method: string; url: string }>}
+ */
+export async function startNewChatgptSession(page, cfg) {
+  const navTimeout = Number(cfg.webNavigationTimeoutMs ?? 90_000);
+  let origin = 'https://chatgpt.com';
+  try {
+    origin = new URL(
+      String(cfg.webChatUrl || cfg.webCookieOrigin || 'https://chatgpt.com'),
+    ).origin;
+  } catch {
+    // keep default
+  }
+
+  const newChatSelectors = [
+    '[data-testid="create-new-chat-button"]',
+    '[data-testid="sidebar-new-chat-button"]',
+    'nav a[href="/"]',
+    'a[href="/"]',
+  ];
+
+  for (const sel of newChatSelectors) {
+    const btn = page.locator(sel).first();
+    try {
+      if (await btn.isVisible({ timeout: 1500 })) {
+        await btn.click();
+        await waitChatReadyChatgpt(page, cfg);
+        return { method: 'click', url: page.url() };
+      }
+    } catch {
+      // try next selector
+    }
+  }
+
+  const newChatUrl = String(cfg.webNewChatUrl ?? '').trim() || `${origin}/`;
+  await page.goto(newChatUrl, {
+    waitUntil: cfg.webWaitUntil || 'domcontentloaded',
+    timeout: navTimeout,
+  });
+  await waitChatReadyChatgpt(page, cfg);
+  return { method: 'goto', url: page.url() };
+}

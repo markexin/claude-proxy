@@ -405,6 +405,9 @@ export function createSseCaptureState(cfg) {
       });
       while (lines.length > max) lines.shift();
     },
+    clear() {
+      lines.length = 0;
+    },
     snapshot() {
       return {
         lines: [...lines],
