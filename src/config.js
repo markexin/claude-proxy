@@ -37,7 +37,7 @@ const defaults = {
   webWatchUseMutation: true,
   webWatchMutationDebounceMs: 400,
   webMessageCaptureMode: 'dom',
-  /** `auto` 由 webChatUrl 推断 doubao | claude；可显式 `doubao` / `claude` */
+  /** `auto` 由 webChatUrl 推断 doubao | claude | chatgpt；可显式指定 */
   webProvider: 'auto',
   webSseUrlIncludes: '',
   webSseMaxBufferLines: 2000,

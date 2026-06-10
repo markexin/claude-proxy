@@ -234,12 +234,15 @@ Cursor 可把「自定义 OpenAI 兼容接口」指到本机，从而用 **已�
 
 ---
 
-## 更换其他聊天站点（如 Claude）
+## 更换其他聊天站点（如 Claude、ChatGPT）
 
 1. 修改 **`webChatUrl`** 为目标对话 URL。
-2. **`sse` 模式与 `webSseUrlIncludes`**：Claude 网页的流式接口是 **`https://claude.ai/api/.../completion`**，响应头为 **`text/event-stream`**（你复制的 curl 即如此）。过滤串必须能匹配 **`claude.ai`**；若只填 **`anthropic`**，则**不会**匹配到这条 URL，缓冲区会一直是空的。可填 **`claude.ai`**、**`*`**，或留空（由 `webChatUrl` 解析出 `claude.ai`）。
-3. 在开发者工具中重新确认 **消息列表** 与 **输入框** 的选择器，更新 **`webMessageSelector`**、**`webInputSelector`**。
-4. Cookie 模式需同步修改 **`webCookieDomain`**、**`webCookieOrigin`** 及 Cookie 文件来源域名。
+2. **`webProvider`**：留空 `auto` 时会按域名推断（`claude.ai` → Claude，`chatgpt.com` → ChatGPT，`doubao.com` → 豆包）；也可显式设为 `claude` / `chatgpt` / `doubao`。
+3. **`sse` 模式与 `webSseUrlIncludes`**：
+   - **Claude**：流式接口为 **`https://claude.ai/api/.../completion`**。过滤串须能匹配 **`claude.ai`**；若只填 **`anthropic`** 则不会匹配。可填 **`claude.ai`**、**`*`**，或留空（由 `webChatUrl` 解析）。
+   - **ChatGPT**：流式接口为 **`https://chatgpt.com/backend-api/conversation`**（或 `/backend-api/f/conversation`），响应为 **`text/event-stream`**。建议 **`webSseUrlIncludes`: `chatgpt.com`** 或 **`*`**；留空时也会从 `webChatUrl` 解析出 `chatgpt.com`。
+4. 在开发者工具中重新确认 **消息列表** 与 **输入框** 的选择器，更新 **`webMessageSelector`**、**`webInputSelector`**（ChatGPT 默认 `#prompt-textarea` 与 `[data-message-author-role="assistant"]`）。
+5. Cookie 模式需同步修改 **`webCookieDomain`**、**`webCookieOrigin`** 及 Cookie 文件来源域名（ChatGPT 示例见 **`config.chatgpt.json`**）。
 
 ---
 

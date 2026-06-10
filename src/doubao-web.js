@@ -4,8 +4,10 @@ import { resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
   effectiveMessageSelector,
+  fillComposerForProvider,
   findComposerForProvider,
   sessionHintForProvider,
+  submitComposerForProvider,
   waitChatReadyForProvider,
 } from './web-provider.js';
 
@@ -302,11 +304,9 @@ export async function sendPromptOnlyOnPage(page, cfg, promptText, diagnosticsBas
   const { before } = await waitChatReadyForProvider(page, cfg);
 
   const composer = await findComposerForProvider(page, cfg);
-  await composer.click();
-  await composer.fill(promptText);
+  await fillComposerForProvider(page, composer, promptText, cfg);
 
-  const submit = cfg.webSubmitKey || 'Enter';
-  await composer.press(submit);
+  await submitComposerForProvider(page, composer, cfg);
 
   return {
     before,

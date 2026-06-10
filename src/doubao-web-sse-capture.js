@@ -15,6 +15,9 @@ export function resolveSseUrlFilter(cfg) {
   try {
     const h = new URL(String(cfg.webChatUrl || 'https://www.doubao.com')).hostname;
     if (h.endsWith('doubao.com')) return 'doubao.com';
+    if (h.includes('chatgpt.com') || h.includes('chat.openai.com')) {
+      return 'chatgpt.com';
+    }
     return h;
   } catch {
     return 'doubao.com';
@@ -96,6 +99,28 @@ function anthropicDataPayloadToAssistantDelta(payload) {
 }
 
 /**
+ * ChatGPT `/backend-api/conversation` SSE：每条 data 常带完整累积正文于 message.content.parts[0]。
+ * @param {string} payload
+ */
+function chatGptDataPayloadToAssistantText(payload) {
+  const p = String(payload).trim();
+  if (!p || p === '[DONE]' || !p.startsWith('{')) return '';
+  try {
+    const o = JSON.parse(p);
+    const delta = o?.choices?.[0]?.delta?.content;
+    if (typeof delta === 'string') return delta;
+    const role = o?.message?.author?.role ?? o?.author?.role;
+    const parts = o?.message?.content?.parts ?? o?.content?.parts;
+    if (role === 'assistant' && Array.isArray(parts) && typeof parts[0] === 'string') {
+      return parts[0];
+    }
+  } catch {
+    // ignore
+  }
+  return '';
+}
+
+/**
  * 将缓冲区合并结果格式化为助手可读纯文本（去掉 event:/data: 外壳与元事件）。
  * @param {string} merged
  * @param {Record<string, unknown>} cfg
@@ -112,6 +137,10 @@ export function formatSseCaptureForDisplay(merged, cfg = {}) {
     /^data:\s*\{/m.test(m) ||
     (m.includes('content_block_delta') && m.includes('data:'));
 
+  const looksLikeChatGptWire =
+    m.includes('"parts"') &&
+    (m.includes('"message"') || m.includes('backend-api/conversation'));
+
   const deltas = [];
   if (looksLikeAnthropicWire || /^data:\s*/m.test(m)) {
     for (const line of m.split(/\r?\n/)) {
@@ -124,6 +153,17 @@ export function formatSseCaptureForDisplay(merged, cfg = {}) {
 
   if (deltas.length > 0) {
     return deltas.join('').trim();
+  }
+
+  if (looksLikeChatGptWire || /backend-api\/(?:f\/)?conversation/i.test(m)) {
+    let last = '';
+    for (const line of m.split(/\r?\n/)) {
+      const dm = line.match(/^data:\s*(.+)$/);
+      if (!dm) continue;
+      const piece = chatGptDataPayloadToAssistantText(dm[1]);
+      if (piece) last = piece;
+    }
+    if (last) return last.trim();
   }
 
   return m;
@@ -269,7 +309,17 @@ function looksLikeSseOrCompletion(url) {
   const u = String(url);
   if (/\/completion(\?|$|\/)/i.test(u)) return true;
   if (u.includes('/v1/messages') && u.includes('stream')) return true;
+  if (/\/backend-api\/(?:f\/)?conversation/i.test(u)) return true;
   return false;
+}
+
+/** 正文是否像 ChatGPT 流式对话 */
+function isChatGptStyleStreamBody(bodyStr) {
+  const t = String(bodyStr);
+  return (
+    t.includes('"parts"') &&
+    (t.includes('"message"') || /backend-api\/(?:f\/)?conversation/i.test(t))
+  );
 }
 
 /** 正文是否像 Anthropic/Claude 流式对话（用于与 bootstrap 等 JSON 区分） */
@@ -286,7 +336,11 @@ function isAnthropicStyleStreamBody(bodyStr) {
  * CDP 单次 HTTP 响应体：对话 completion 记为 cdp-completion，其余记为 cdp-sse-side（不参与多轮 messages）。
  */
 function kindForCdpFinishedBody(url, bodyStr) {
-  if (looksLikeSseOrCompletion(url) || isAnthropicStyleStreamBody(bodyStr)) {
+  if (
+    looksLikeSseOrCompletion(url) ||
+    isAnthropicStyleStreamBody(bodyStr) ||
+    isChatGptStyleStreamBody(bodyStr)
+  ) {
     return 'cdp-completion';
   }
   return 'cdp-sse-side';
@@ -425,7 +479,8 @@ function browserInstallSseHooks(arg) {
   };
 
   const looksCompletionStream = (/** @type {string} */ urlStr) =>
-    /\/completion(\?|$|\/)/i.test(urlStr);
+    /\/completion(\?|$|\/)/i.test(urlStr) ||
+    /\/backend-api\/(?:f\/)?conversation/i.test(urlStr);
 
   const shouldReadSseBody = (/** @type {string} */ urlStr, /** @type {string} */ contentType) => {
     const ct = contentType.toLowerCase();

@@ -84,7 +84,7 @@ async function main() {
         webAuth:
           'Cookie 勿入库。webCookieSource=file + doubao-cookies.txt；auto 优先 DOUBAO_COOKIE 再读文件。',
         webConfig:
-          'webChatUrl、webPageUrlIncludes、webMessageSelector、webInputSelector、webReply*、换站见 config.example.json。',
+          'webChatUrl、webPageUrlIncludes、webMessageSelector、webInputSelector、webReply*、webProvider(auto|doubao|claude|chatgpt)；ChatGPT 见 config.chatgpt.json。',
       });
       return;
     }
